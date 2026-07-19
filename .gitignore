@@ -1,0 +1,14 @@
+﻿# 个人配置与运行产物, 不入库
+config.toml
+tokens.jsonl
+mitm_logs/
+*.log
+__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+.env
