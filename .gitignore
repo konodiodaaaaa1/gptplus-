@@ -12,3 +12,8 @@ dist/
 .venv/
 venv/
 .env
+
+_patch*.py
+_smoke*
+__init__.py
+

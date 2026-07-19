@@ -85,11 +85,15 @@ def _looks_like_mumu(adb: str, serial: str) -> bool:
 def _probe_device(adb: str, serial: str) -> MuMuInstance:
     inst = MuMuInstance(adb_path=adb, serial=serial)
 
-    _, out = _run_adb(adb, serial, ["shell", "getprop ro.build.version.release"])
-    inst.android_version = out.strip().splitlines()[0] if out.strip() else ""
+    # 可达性检查: 设备不可达时 _run_adb 会返回 "device not found" 字样
+    rc, out = _run_adb(adb, serial, ["shell", "getprop ro.build.version.release"])
+    if rc != 0 or not out.strip() or "not found" in out.lower() or "error" in out.lower()[:20]:
+        return inst
+    inst.android_version = out.strip().splitlines()[0]
 
     _, out = _run_adb(adb, serial, ["shell", "getprop ro.product.model"])
-    inst.model = out.strip().splitlines()[0] if out.strip() else ""
+    line = out.strip().splitlines()[0] if out.strip() else ""
+    inst.model = line if "not found" not in line.lower() else ""
 
     rc, _ = _run_adb(adb, serial, ["shell", "su -c id"])
     inst.rooted = (rc == 0)
@@ -101,8 +105,9 @@ def _probe_device(adb: str, serial: str) -> MuMuInstance:
     inst.google_accounts = re.findall(r"Account \{name=([^,]+@[^,]+), type=com\.google\}", out)
 
     _, out = _run_adb(adb, serial, ["shell", "settings get global http_proxy"])
-    inst.current_proxy = out.strip().splitlines()[0] if out.strip() else ""
-
+    proxy = out.strip().splitlines()[0] if out.strip() else ""
+    if "not found" not in proxy.lower():
+        inst.current_proxy = proxy
     return inst
 
 

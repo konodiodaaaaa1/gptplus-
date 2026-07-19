@@ -1,0 +1,36 @@
+﻿* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #0f1117; color: #e4e4e7; padding: 20px; }
+h1 { color: #10a37f; margin-bottom: 4px; }
+.subtitle { color: #888; margin-bottom: 20px; font-size: 14px; }
+.layout { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1400px; }
+.panel { background: #1a1d27; border: 1px solid #2a2d37; border-radius: 8px; padding: 16px; }
+.panel h2 { font-size: 16px; margin-bottom: 12px; color: #10a37f; border-bottom: 1px solid #2a2d37; padding-bottom: 8px; }
+.row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+input, textarea, select { background: #0f1117; border: 1px solid #2a2d37; color: #e4e4e7; padding: 6px 10px; border-radius: 4px; font-size: 13px; }
+input[type=text], input[type=password] { flex: 1; }
+textarea { width: 100%; min-height: 120px; font-family: monospace; }
+button { background: #10a37f; color: white; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+button:hover { background: #1ab48f; }
+button.danger { background: #c53030; }
+button.danger:hover { background: #e54949; }
+button.secondary { background: #3a3d47; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #2a2d37; }
+th { color: #888; font-weight: normal; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+.badge.pending { background: #3a3d47; color: #888; }
+.badge.play_logged_in { background: #2d4a2d; color: #6fcf6f; }
+.badge.gpt_logged_in { background: #2d3a4a; color: #6f9fcf; }
+.badge.subscribed { background: #2d4a3a; color: #10a37f; }
+.badge.failed { background: #4a2d2d; color: #cf6f6f; }
+.status-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+.status-grid dt { color: #888; }
+.status-grid dd { color: #e4e4e7; }
+.log-list { max-height: 300px; overflow-y: auto; font-size: 12px; font-family: monospace; }
+.log-list div { padding: 3px 0; border-bottom: 1px solid #2a2d37; }
+.log-list .success { color: #6fcf6f; }
+.log-list .failed { color: #cf6f6f; }
+.log-list .running { color: #6f9fcf; }
+.hint { font-size: 12px; color: #888; margin-top: 6px; }
+.disclaimer { background: #2d2d1a; border: 1px solid #5a5a2d; color: #e4d44e; padding: 8px 12px; border-radius: 4px; font-size: 12px; margin-bottom: 20px; }

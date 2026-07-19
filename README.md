@@ -134,6 +134,63 @@ gptplus-simulator/
 └── README.md
 ```
 
+
+## WebUI (账号管理 + 流程编排 + sub2api 入库)
+
+本项目附带 FastAPI WebUI, 提供批量账号导入、MuMu 自动化流程编排、token 队列管理、sub2api 导出。
+
+### 启动
+
+```bash
+python -m src.web.app --host 127.0.0.1 --port 8080
+```
+
+浏览器访问 http://127.0.0.1:8080
+
+### 功能面板
+
+| 面板 | 说明 |
+|------|------|
+| MuMu 状态 | ADB/root/GPT app/Google 账号/代理/mitmproxy 实时状态 |
+| 批量导入 | 每行一条 `email----password` 或 `email:password` 导入已有 Google 账号 |
+| 账号管理 | 状态列表 (pending/play_logged_in/gpt_logged_in/subscribed/failed), 一键单跑/批量跑 |
+| Token 队列 | mitmproxy 捕获的 fetch_token, 支持取下一个激活或手动指定 |
+| sub2api 导出 | 一键导出已激活 Plus 账号 JSON / 配置片段 |
+| 任务日志 | 实时滚动显示任务执行 |
+
+### API 路由
+
+| Method | Path | 说明 |
+|--------|------|------|
+| GET | `/` | WebUI 首页 |
+| GET | `/api/status` | MuMu 状态 |
+| GET | `/api/accounts` | 列出账号 |
+| POST | `/api/accounts/import` | 批量导入 |
+| DELETE | `/api/accounts/{email}` | 删除账号 |
+| POST | `/api/accounts/{email}/pipeline` | 跑完整流程 (Play 登录 -> GPT 登录) |
+| GET | `/api/tokens` | token 队列 |
+| POST | `/api/tokens/activate` | 指定 token + account_id 激活 |
+| POST | `/api/tokens/activate-next` | 取下一个 token 激活 |
+| POST | `/api/intercept/start` | 启动 mitmproxy |
+| POST | `/api/intercept/stop` | 停止 mitmproxy |
+| GET | `/api/logs` | 任务日志 |
+| GET | `/api/sub2api/export` | 导出已激活账号 |
+| GET | `/api/sub2api/config` | sub2api 配置片段 |
+
+### 关于"自动化 Gmail 注册"
+
+本工具**不提供**自动注册 Gmail 账号的功能, 原因: (1) Gmail 注册有 hCaptcha、手机验证、设备指纹风控, 无稳定绕过方案; (2) 批量注册违反 Google 服务条款。
+
+WebUI 的批量导入面向**用户已合法拥有的 Google 账号**, 用于在 MuMu 中自动化完成 Play Store 登录、GPT 登录、订阅流程对接, 并把结果 (account_id / JWT / 订阅状态) 入库供 sub2api 调用。
+
+### 数据库
+
+SQLite (默认 `gptplus.db`, 环境变量 `GPTPLUS_DB` 可改), 三张表:
+
+- `googleaccount`: 导入账号 + GPT account_id/JWT + Plus 状态
+- `capturedtoken`: mitmproxy 捕获的 fetch_token
+- `tasklog`: 任务日志
+
 ## 技术细节
 
 ### MuMu 自动检测

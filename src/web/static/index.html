@@ -1,0 +1,247 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>GPT Plus 模拟器 - 学习研究 WebUI</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<h1>GPT Plus 模拟器 WebUI</h1>
+<div class="subtitle">仅供学习研究使用 · 不得用于违反服务条款或法律法规的场景</div>
+<div class="disclaimer">⚠️ 本工具仅用于学习 RevenueCat 订阅链路、MITM 代理、Android 自动化等技术。批量导入的 Google 账号需为合法拥有的已有账号, 不支持自动注册 Gmail 账号。</div>
+
+<div class="layout">
+  <!-- 左列 -->
+  <div>
+    <div class="panel" style="margin-bottom:20px;">
+      <h2>1. MuMu 模拟器状态</h2>
+      <dl class="status-grid" id="status-grid">加载中...</dl>
+      <div class="row" style="margin-top:10px;">
+        <button onclick="refreshStatus()">刷新</button>
+        <button id="btn-intercept" onclick="toggleIntercept()">启动拦截</button>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px;">
+      <h2>2. 批量导入 Google 账号</h2>
+      <div class="hint">格式: 每行一条 <code>email----password</code> 或 <code>email:password</code></div>
+      <textarea id="import-text" placeholder="ganyuxing816@gmail.com----password123&#10;another@gmail.com:pwd456"></textarea>
+      <div class="row" style="margin-top:8px;">
+        <button onclick="importAccounts()">导入</button>
+        <button class="secondary" onclick="document.getElementById('import-text').value=''">清空</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>3. 账号管理</h2>
+      <table id="accounts-table">
+        <thead><tr><th>邮箱</th><th>状态</th><th>account_id</th><th>Plus</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="row" style="margin-top:8px;">
+        <button onclick="runAllPipelines()">批量跑流程</button>
+        <button class="secondary" onclick="refreshAccounts()">刷新</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右列 -->
+  <div>
+    <div class="panel" style="margin-bottom:20px;">
+      <h2>4. Token 队列 (mitmproxy 捕获)</h2>
+      <table id="tokens-table">
+        <thead><tr><th>fetch_token</th><th>捕获时间</th><th>过期</th><th>已用</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="row" style="margin-top:10px;">
+        <input type="text" id="target-account-id" placeholder="目标 account_id (UUID)">
+        <button onclick="activateNext()">取下一个 token 激活</button>
+      </div>
+      <div class="hint">或单独激活: 填写 fetch_token + account_id</div>
+      <div class="row">
+        <input type="text" id="manual-token" placeholder="fetch_token">
+        <input type="text" id="manual-account" placeholder="account_id">
+        <button onclick="activateManual()">激活</button>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:20px;">
+      <h2>5. sub2api 导出</h2>
+      <div class="hint">导出已激活 Plus 的账号供 sub2api 使用</div>
+      <div class="row" style="margin-top:8px;">
+        <button onclick="exportSub2api('json')">导出 JSON</button>
+        <button onclick="exportSub2api('config')">导出配置片段</button>
+      </div>
+      <textarea id="sub2api-output" placeholder="点击上方按钮查看导出结果" style="margin-top:8px;"></textarea>
+    </div>
+
+    <div class="panel">
+      <h2>6. 任务日志</h2>
+      <div class="log-list" id="log-list">加载中...</div>
+      <div class="row" style="margin-top:8px;">
+        <button class="secondary" onclick="refreshLogs()">刷新</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const api = (path, opts) => fetch(path, {
+  headers: {"Content-Type": "application/json"},
+  ...opts,
+}).then(r => r.json().catch(() => ({})));
+
+async function refreshStatus() {
+  const s = await api("/api/status");
+  const grid = document.getElementById("status-grid");
+  if (!s.online) {
+    grid.innerHTML = "<dt>状态</dt><dd>未检测到 MuMu</dd>";
+    return;
+  }
+  grid.innerHTML = Object.entries({
+    "ADB 路径": s.adb_path || "-",
+    "设备序列号": s.serial,
+    "Android 版本": s.android_version,
+    "Root": s.rooted ? "已 root" : "未 root",
+    "GPT app": s.gpt_installed ? "已安装" : "未安装",
+    "Google 账号": (s.google_accounts || []).join(", ") || "无",
+    "当前代理": s.current_proxy || "无",
+    "mitmproxy": s.mitm_running ? "运行中" : "未启动",
+  }).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  const btn = document.getElementById("btn-intercept");
+  btn.textContent = s.mitm_running ? "停止拦截" : "启动拦截";
+  btn.className = s.mitm_running ? "danger" : "";
+}
+
+async function toggleIntercept() {
+  const s = await api("/api/status");
+  if (s.mitm_running) {
+    await api("/api/intercept/stop", {method: "POST"});
+  } else {
+    await api("/api/intercept/start", {method: "POST"});
+  }
+  refreshStatus();
+}
+
+function parseImportText(text) {
+  return text.split("\n").map(l => l.trim()).filter(Boolean).map(line => {
+    let parts;
+    if (line.includes("----")) parts = line.split("----");
+    else if (line.includes(":")) parts = line.split(/:(.+)/);
+    else if (line.includes("|")) parts = line.split("|");
+    else return null;
+    if (parts.length < 2) return null;
+    return {email: parts[0].trim(), password: parts[1].trim()};
+  }).filter(Boolean);
+}
+
+async function importAccounts() {
+  const text = document.getElementById("import-text").value;
+  const accounts = parseImportText(text);
+  if (!accounts.length) { alert("未解析到有效账号"); return; }
+  const r = await api("/api/accounts/import", {
+    method: "POST", body: JSON.stringify({accounts}),
+  });
+  alert(`导入完成: 新增 ${r.added}, 跳过(已存在) ${r.skipped}`);
+  refreshAccounts();
+}
+
+async function refreshAccounts() {
+  const rows = await api("/api/accounts");
+  const tbody = document.querySelector("#accounts-table tbody");
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>${r.email}</td>
+      <td><span class="badge ${r.status}">${r.status}</span></td>
+      <td>${r.gpt_account_id || "-"}</td>
+      <td>${r.plus_active ? "✅" : "✗"}</td>
+      <td>
+        <button onclick="runPipeline('${r.email}')">跑流程</button>
+        <button class="danger" onclick="deleteAccount('${r.email}')">删</button>
+      </td>
+    </tr>`).join("");
+}
+
+async function runPipeline(email) {
+  const r = await api(`/api/accounts/${encodeURIComponent(email)}/pipeline`, {method: "POST"});
+  alert(r.message);
+  setTimeout(refreshAccounts, 2000);
+}
+
+async function runAllPipelines() {
+  const rows = await api("/api/accounts");
+  for (const r of rows) {
+    if (["pending", "failed"].includes(r.status)) {
+      await api(`/api/accounts/${encodeURIComponent(r.email)}/pipeline`, {method: "POST"});
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
+  alert("批量流程已启动");
+  refreshAccounts();
+}
+
+async function deleteAccount(email) {
+  if (!confirm(`确定删除 ${email}?`)) return;
+  await api(`/api/accounts/${encodeURIComponent(email)}`, {method: "DELETE"});
+  refreshAccounts();
+}
+
+async function refreshTokens() {
+  const rows = await api("/api/tokens");
+  const tbody = document.querySelector("#tokens-table tbody");
+  tbody.innerHTML = rows.slice(0, 20).map(r => `
+    <tr>
+      <td title="${r.fetch_token}">${r.fetch_token.slice(0, 24)}...</td>
+      <td>${(r.captured_at || "").slice(0, 19)}</td>
+      <td>${(r.expires_at || "").slice(0, 19)}</td>
+      <td>${r.used ? "✅ "+(r.used_by_account_id||"").slice(0,8) : "可用"}</td>
+    </tr>`).join("");
+}
+
+async function activateNext() {
+  const account_id = document.getElementById("target-account-id").value.trim();
+  if (!account_id) { alert("请填写目标 account_id"); return; }
+  const r = await api("/api/tokens/activate-next", {
+    method: "POST", body: JSON.stringify({account_id}),
+  });
+  alert(r.activated ? "激活成功" : "激活失败, 查看后端日志");
+  refreshTokens();
+  refreshAccounts();
+}
+
+async function activateManual() {
+  const fetch_token = document.getElementById("manual-token").value.trim();
+  const account_id = document.getElementById("manual-account").value.trim();
+  if (!fetch_token || !account_id) { alert("请填写 fetch_token 和 account_id"); return; }
+  const r = await api("/api/tokens/activate", {
+    method: "POST", body: JSON.stringify({fetch_token, account_id}),
+  });
+  alert(r.activated ? "激活成功" : "激活失败");
+  refreshTokens();
+  refreshAccounts();
+}
+
+async function exportSub2api(type) {
+  const path = type === "json" ? "/api/sub2api/export" : "/api/sub2api/config";
+  const r = await api(path);
+  document.getElementById("sub2api-output").value = JSON.stringify(r, null, 2);
+}
+
+async function refreshLogs() {
+  const rows = await api("/api/logs?limit=50");
+  const div = document.getElementById("log-list");
+  div.innerHTML = rows.map(l => `
+    <div class="${l.status}">
+      [${(l.started_at || "").slice(5, 19)}] ${l.task_type} · ${l.target_email || "-"} · ${l.status}
+      ${l.message ? " · " + l.message.slice(0, 80) : ""}
+    </div>`).join("");
+}
+
+function refreshAll() {
+  refreshStatus(); refreshAccounts(); refreshTokens(); refreshLogs();
+}
+refreshAll();
+setInterval(refreshAll, 5000);
+</script>
+</body>
+</html>
