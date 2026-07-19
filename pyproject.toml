@@ -1,22 +1,25 @@
-﻿[build-system]
+[build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "gptplus-simulator"
 version = "0.1.0"
-description = "GPT Plus 模拟器订阅链路自动化工具（仅供学习）"
+description = "GPT Plus simulator automation tool for learning and research"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
 authors = [{name = "anonymous"}]
 dependencies = [
     "cryptography>=40.0.0",
     "mitmproxy>=10.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "sqlmodel>=0.0.16",
 ]
 
 [project.scripts]
-gptplus-flow = "gptplus_flow:main"
+gptplus-flow = "src.gptplus_flow:main"
 
-[tool.setuptools]
-packages = ["src"]
+[tool.setuptools.packages.find]
+include = ["src*"]

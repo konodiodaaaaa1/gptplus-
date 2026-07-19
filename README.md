@@ -116,6 +116,7 @@ python -m src.gptplus_flow assemble --fetch-token "<TOKEN>" --account-id "<ACCOU
 ```
 gptplus-simulator/
 ├── src/
+│   ├── __init__.py
 │   ├── gptplus_flow.py     # 主入口 + CLI
 │   ├── config.py           # 配置加载（环境变量 > toml > 默认值）
 │   ├── mumu_detect.py      # MuMu 自动检测（ADB / root / 应用 / 账号）
@@ -124,7 +125,15 @@ gptplus-simulator/
 │   ├── token_capture.py    # 等待并解析捕获到的 token
 │   ├── token_queue.py      # 持久化 token 队列（过期 / 已用标记）
 │   ├── revenuecat.py       # RevenueCat / OpenAI API 交互（token 拼接 + 提交）
-│   └── addon.py            # mitmproxy addon（拦截 /v1/receipts, 保存 token, 阻断真实请求）
+│   ├── addon.py            # mitmproxy addon（拦截 /v1/receipts, 保存 token, 阻断真实请求）
+│   └── web/
+│       ├── app.py          # FastAPI WebUI 后端
+│       ├── automation.py   # MuMu UI 自动化编排 + 断点续跑
+│       ├── db.py           # SQLite 数据模型
+│       ├── protection.py   # 熔断器 / 断点 / 重试退避
+│       └── static/
+│           ├── index.html  # 单页前端
+│           └── style.css   # 前端样式
 ├── scripts/
 │   └── mitmdump.bat        # mitmdump 启动脚本
 ├── config.example.toml     # 配置示例
@@ -174,6 +183,12 @@ python -m src.web.app --host 127.0.0.1 --port 8080
 | POST | `/api/intercept/start` | 启动 mitmproxy |
 | POST | `/api/intercept/stop` | 停止 mitmproxy |
 | GET | `/api/logs` | 任务日志 |
+| GET | `/api/circuits` | 熔断器状态 |
+| POST | `/api/circuits/{name}/reset` | 重置单个熔断器 |
+| POST | `/api/circuits/reset-all` | 重置全部熔断器 |
+| GET | `/api/checkpoints` | 所有账号断点 |
+| GET | `/api/checkpoints/{email}` | 单账号断点 |
+| POST | `/api/checkpoints/{email}/reset` | 重置单账号断点 |
 | GET | `/api/sub2api/export` | 导出已激活账号 |
 | GET | `/api/sub2api/config` | sub2api 配置片段 |
 
@@ -206,7 +221,7 @@ SQLite (默认 `gptplus.db`, 环境变量 `GPTPLUS_DB` 可改), 三张表:
 | mitmproxy addon 捕获 `fetch_token` 逻辑 | 单元 + mock 流量 | ✅ 入队 + 阻断 + 假 200 |
 | RevenueCat `assemble_revenuecat_headers / body` (token 拼接) | 字段比对真实抓包 | ✅ 字段完全一致 |
 | `mumu_mock_subscription_flow.py demo` (mock 端到端) | 5 个测试场景 | ✅ 全部通过 (200/409/409) |
-| WebUI 后端 14 个 API 路由 | uvicorn 冒烟测试 | ✅ 全部 200 |
+| WebUI 后端 19 个 API 路由 + 首页 | uvicorn 冒烟测试 | ✅ 全部 200 |
 | WebUI 前端单页 | 浏览器加载 | ✅ 正常渲染 |
 | 熔断器 (CircuitBreaker) | 离线场景 3 次失败触发 | ✅ OPEN + 冷却 + reset |
 | 断点保护 (CheckpointStore) | 中断 + resume 续跑 | ✅ 断点持久化 + 正确恢复 |
