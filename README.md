@@ -191,6 +191,53 @@ SQLite (默认 `gptplus.db`, 环境变量 `GPTPLUS_DB` 可改), 三张表:
 - `capturedtoken`: mitmproxy 捕获的 fetch_token
 - `tasklog`: 任务日志
 
+
+## 测试覆盖度说明
+
+> 为避免误导, 这里如实标注各部分的真实测试状态。本项目的链路较长, 部分环节依赖外部账号与支付, 未能完成端到端样本验证。
+
+### 已验证通过 (有测试样本)
+
+| 模块 | 验证方式 | 结果 |
+|------|----------|------|
+| MuMu 自动检测 (ADB / root / GPT app / Google 账号 / 代理) | 真机 MuMu 12 + ADB | ✅ 全部字段正确返回 |
+| mitmproxy CA 注入 (tmpfs 覆盖挂载) | MuMu root + Android 12 | ✅ 注入成功, RevenueCat TLS 拦截生效 |
+| mitmproxy 拦截 RevenueCat `/v1/subscribers/` | 真实 GPT app 流量 | ✅ 拦截 + 解密成功 |
+| mitmproxy addon 捕获 `fetch_token` 逻辑 | 单元 + mock 流量 | ✅ 入队 + 阻断 + 假 200 |
+| RevenueCat `assemble_revenuecat_headers / body` (token 拼接) | 字段比对真实抓包 | ✅ 字段完全一致 |
+| `mumu_mock_subscription_flow.py demo` (mock 端到端) | 5 个测试场景 | ✅ 全部通过 (200/409/409) |
+| WebUI 后端 14 个 API 路由 | uvicorn 冒烟测试 | ✅ 全部 200 |
+| WebUI 前端单页 | 浏览器加载 | ✅ 正常渲染 |
+| 熔断器 (CircuitBreaker) | 离线场景 3 次失败触发 | ✅ OPEN + 冷却 + reset |
+| 断点保护 (CheckpointStore) | 中断 + resume 续跑 | ✅ 断点持久化 + 正确恢复 |
+| `detect_mumu` 超时保护 | MuMu 离线场景 | ✅ 8 秒内返回 None |
+
+### 未能完成样本验证 (后续需补)
+
+| 模块 | 未验证原因 | 风险点 |
+|------|------------|--------|
+| **Google Play 支付 → `fetch_token` 真实捕获** | 测试用 Google 账号被封禁, 无法完成支付 | mitmproxy addon 逻辑已验证, 但未走过真实支付流量 |
+| **`activate` 真实激活 Plus** | 缺少有效 `fetch_token` 样本 | RevenueCat 请求体字段已比对真实抓包, 但未提交过真实 token |
+| **Pipeline 端到端 (Play 登录 → GPT 登录 → 捕获 → 激活)** | 同上, 账号封禁导致链路在第 1 步中断 | 各阶段单元逻辑已验证, 串联未跑通 |
+| **`stage_play_login` UI 自动化** | MuMu 离线时返回 `未检测到 MuMu` (符合预期), 但在线时的 UI 元素定位未实测 | 不同 MuMu 版本/分辨率下 UI 文本可能不同, 需按实际调整 `_wait_for_text` 匹配规则 |
+| **`stage_gpt_login` OAuth 自动化** | GPT 登录走 Auth0 浏览器跳转, 自动化复杂度高, 当前仅检测已登录态 | 完整 OAuth 输入流程未实现, 当前需手动完成 |
+| **`stage_verify` 独立验证** | 依赖 `gpt_jwt`, 未在真实账号上跑 | 逻辑已实现, 待样本验证 |
+| **sub2api 导出对接** | 缺少已激活账号 | 字段格式已按常见 sub2api 项目设计, 实际对接需按目标项目调整 |
+
+### 后续验证计划
+
+1. 准备一个未被封禁、有支付方式的 Google 账号
+2. 在 MuMu 内完成真实 Plus 支付, 验证 `fetch_token` 被 addon 捕获
+3. 用捕获的 token + 目标 GPT 账号 `account_id` 跑 `activate`, 验证 Plus 开通
+4. 跑通完整 pipeline, 验证断点/熔断在真实流程中的行为
+5. 验证 sub2api 导出字段与目标 sub2api 项目对接
+
+### 已知限制
+
+- Google Play Services 对 `play-fe.googleapis.com` 做了证书固定, 本项目选择 `--ignore-hosts` 透传而非对抗
+- `stage_play_login` 的 UI 文本匹配在不同 Android 版本可能需要调整
+- `stage_gpt_login` 的 OAuth 自动化未完整实现, 当前需手动完成登录后由系统检测 account_id
+
 ## 技术细节
 
 ### MuMu 自动检测

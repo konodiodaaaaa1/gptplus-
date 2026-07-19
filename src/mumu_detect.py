@@ -112,29 +112,41 @@ def _probe_device(adb: str, serial: str) -> MuMuInstance:
 
 
 def detect_mumu(cfg: Config) -> Optional[MuMuInstance]:
-    """返回第一个检测到的 MuMu 实例, 找不到返回 None。"""
-    adb = _find_adb_binary(cfg)
-    if not adb:
-        return None
+    """返回第一个检测到的 MuMu 实例, 找不到返回 None.
 
-    # 用户显式指定 serial
-    if cfg.serial:
-        inst = _probe_device(adb, cfg.serial)
-        if _looks_like_mumu(adb, cfg.serial) or True:
-            return inst
+    整体超时保护: 探测过程最多 8 秒, 超时返回 None, 避免 WebUI /api/status 卡死.
+    """
+    import threading as _th
+    box: list = []
 
-    # 枚举所有设备
-    for serial in _list_devices(adb):
-        if not _looks_like_mumu(adb, serial):
-            continue
-        return _probe_device(adb, serial)
+    def _detect() -> None:
+        adb = _find_adb_binary(cfg)
+        if not adb:
+            return
+        if cfg.serial:
+            inst = _probe_device(adb, cfg.serial)
+            if inst.android_version:
+                box.append(inst)
+                return
+        for serial in _list_devices(adb):
+            if not _looks_like_mumu(adb, serial):
+                continue
+            inst = _probe_device(adb, serial)
+            if inst.android_version:
+                box.append(inst)
+                return
+        for serial in cfg.mumu_serial_candidates[:2]:
+            if ":" in serial:
+                try:
+                    subprocess.run([adb, "connect", serial], capture_output=True, text=True, timeout=3)
+                except Exception:
+                    pass
+            inst = _probe_device(adb, serial)
+            if inst.android_version:
+                box.append(inst)
+                return
 
-    # 兜底: 尝试候选 serial (即使 adb devices 暂时没列出, 也可以 connect)
-    for serial in cfg.mumu_serial_candidates:
-        if ":" in serial:  # 网络设备, 尝试 connect
-            subprocess.run([adb, "connect", serial], capture_output=True, text=True, timeout=5)
-        inst = _probe_device(adb, serial)
-        # 简单可达性检查
-        if inst.android_version:
-            return inst
-    return None
+    t = _th.Thread(target=_detect, daemon=True)
+    t.start()
+    t.join(timeout=8)
+    return box[0] if box else None

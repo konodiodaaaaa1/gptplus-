@@ -31,6 +31,11 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from . import db, automation
+from .protection import (
+    get_breaker_registry,
+    get_checkpoint_store,
+    CircuitBreakerOpenError,
+)
 from .db import GoogleAccount, CapturedToken, TaskLog, get_session, log_task
 from ..config import load_config
 from ..mumu_detect import detect_mumu
@@ -144,13 +149,6 @@ async def api_delete_account(email: str):
         s.commit()
     return {"deleted": email}
 
-
-@app.post("/api/accounts/{email}/pipeline")
-async def api_run_pipeline(email: str):
-    """对该账号异步跑完整链路 (Play 登录 -> GPT 登录)."""
-    def _worker():
-        automation.run_full_pipeline(email)
-    threading.Thread(target=_worker, daemon=True).start()
     return {"started": True, "email": email, "message": "任务已异步启动, 查看日志查看进度"}
 
 
@@ -244,6 +242,66 @@ async def api_intercept_stop():
 @app.get("/api/logs")
 async def api_logs(limit: int = 50):
     return [l.dict() for l in db.list_recent_logs(limit)]
+
+# ============================================================
+# 熔断器与断点 (失败保护)
+# ============================================================
+
+@app.get("/api/circuits")
+async def api_circuits():
+    """查看所有熔断器状态 (CLOSED/OPEN/HALF_OPEN + 失败计数)."""
+    return get_breaker_registry().all_states()
+
+
+@app.post("/api/circuits/{name}/reset")
+async def api_circuit_reset(name: str):
+    """手动重置某个熔断器 (或全部)."""
+    get_breaker_registry().reset(name)
+    return {"reset": name}
+
+
+@app.post("/api/circuits/reset-all")
+async def api_circuit_reset_all():
+    get_breaker_registry().reset()
+    return {"reset": "all"}
+
+
+@app.get("/api/checkpoints")
+async def api_checkpoints():
+    """查看所有账号的 pipeline 断点状态."""
+    return get_checkpoint_store().all_states()
+
+
+@app.get("/api/checkpoints/{email}")
+async def api_checkpoint_get(email: str):
+    cp = get_checkpoint_store().get(email)
+    return cp.to_dict()
+
+
+@app.post("/api/checkpoints/{email}/reset")
+async def api_checkpoint_reset(email: str):
+    """重置某账号的断点 (下次跑会从头开始)."""
+    get_checkpoint_store().reset(email)
+    return {"reset": email}
+
+
+class PipelineReq(BaseModel):
+    resume: bool = True
+
+
+@app.post("/api/accounts/{email}/pipeline")
+async def api_run_pipeline(email: str, resume: bool = True):
+    """对该账号异步跑完整链路. resume=True 从断点续跑, False 从头开始."""
+    def _worker():
+        try:
+            automation.run_pipeline_with_checkpoint(email, resume=resume)
+        except CircuitBreakerOpenError as e:
+            db.log_task("pipeline", "failed", message=str(e), target_email=email)
+        except Exception as e:
+            db.log_task("pipeline", "failed", message=f"unexpected: {e}", target_email=email)
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"started": True, "email": email, "resume": resume,
+            "message": "任务已异步启动, 查看 /api/logs 或 /api/checkpoints/" + email + " 看进度"}
 
 
 # ============================================================
