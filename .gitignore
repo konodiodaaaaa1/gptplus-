@@ -1,6 +1,12 @@
-﻿# 个人配置与运行产物, 不入库
+# 个人配置与运行产物, 不入库
 config.toml
 tokens.jsonl
+checkpoints.json
+gptplus.db
+screenshots/
+web.out.log
+web.err.log
+*.orig
 mitm_logs/
 *.log
 __pycache__/
@@ -16,4 +22,3 @@ venv/
 _patch*.py
 _smoke*
 __init__.py
-

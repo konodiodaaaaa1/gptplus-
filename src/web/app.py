@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -156,8 +157,55 @@ async def api_delete_account(email: str):
 # Token 队列
 # ============================================================
 
+def _sync_tokens_file_to_db() -> None:
+    """把 tokens.jsonl 中未入 DB 的 token 同步进 capturedtoken 表.
+
+    addon 捕获 token 时已双写文件 + DB; 此函数做容错: 当 addon 因 DB 锁/异常
+    漏写 DB 但写了文件时, WebUI 拉取 /api/tokens 会把文件里的 token 补进 DB.
+    """
+    cfg = load_config()
+    qfile = cfg.token_queue_file
+    if not os.path.exists(qfile):
+        return
+    try:
+        with open(qfile, "r", encoding="utf-8") as f:
+            items = []
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return
+    if not items:
+        return
+    with get_session() as s:
+        for r in items:
+            ft = r.get("fetch_token")
+            if not ft:
+                continue
+            exists = s.exec(select(CapturedToken).where(CapturedToken.fetch_token == ft)).first()
+            if exists:
+                continue
+            s.add(CapturedToken(
+                fetch_token=ft,
+                captured_at=r.get("captured_at", ""),
+                expires_at=r.get("expires_at", ""),
+                original_app_user_id=r.get("original_app_user_id"),
+                storefront=r.get("storefront", "US"),
+                used=bool(r.get("used", False)),
+                used_by_account_id=r.get("used_by"),
+                used_at=r.get("used_at"),
+            ))
+        s.commit()
+
+
 @app.get("/api/tokens")
 async def api_list_tokens():
+    _sync_tokens_file_to_db()
     with get_session() as s:
         rows = s.exec(select(CapturedToken).order_by(CapturedToken.id.desc())).all()
         return [r.dict() for r in rows]
@@ -198,6 +246,30 @@ async def api_activate_next(req: ActivateNextReq):
             raise HTTPException(404, "no available token in queue")
         fetch_token = tok.fetch_token
     return await api_activate(ActivateReq(fetch_token=fetch_token, account_id=req.account_id, storefront=req.storefront))
+
+
+# ============================================================
+# CA 证书注入 (setup)
+# ============================================================
+
+@app.post("/api/setup")
+async def api_setup():
+    """注入 mitmproxy CA 证书到 MuMu 系统 CA 存储 (tmpfs 覆盖挂载).
+
+    前置: MuMu root + 已运行过一次 mitmdump 生成 ~/.mitmproxy/mitmproxy-ca-cert.pem.
+    每次 MuMu 重启后需重新注入 (tmpfs 证书会丢失).
+    """
+    cfg = load_config()
+    inst = detect_mumu(cfg)
+    if inst is None:
+        raise HTTPException(503, "未检测到 MuMu 模拟器")
+    from ..ca_inject import install_mitm_ca
+    ok = install_mitm_ca(inst, cfg)
+    log_task("setup", "success" if ok else "failed",
+             message="CA 注入成功" if ok else "CA 注入失败 (检查 root / mitmproxy CA 是否已生成)")
+    if not ok:
+        raise HTTPException(500, "CA 注入失败, 请检查 MuMu root 状态及 mitmproxy CA 是否已生成")
+    return {"installed": True, "ca_path": cfg.mitm_ca_pem}
 
 
 # ============================================================
@@ -242,6 +314,16 @@ async def api_intercept_stop():
 @app.get("/api/logs")
 async def api_logs(limit: int = 50):
     return [l.dict() for l in db.list_recent_logs(limit)]
+
+
+@app.delete("/api/logs")
+async def api_logs_clear():
+    """清空所有任务日志."""
+    from sqlmodel import delete
+    with get_session() as s:
+        s.exec(delete(TaskLog))
+        s.commit()
+    return {"cleared": True}
 
 # ============================================================
 # 熔断器与断点 (失败保护)

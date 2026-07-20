@@ -19,6 +19,7 @@
       <div class="row" style="margin-top:10px;">
         <button onclick="refreshStatus()">刷新</button>
         <button id="btn-intercept" onclick="toggleIntercept()">启动拦截</button>
+        <button onclick="setupCA()">注入CA证书</button>
       </div>
     </div>
 
@@ -80,6 +81,7 @@
       <div class="log-list" id="log-list">加载中...</div>
       <div class="row" style="margin-top:8px;">
         <button class="secondary" onclick="refreshLogs()">刷新</button>
+        <button class="danger" onclick="clearLogs()">清空日志</button>
       </div>
     </div>
   </div>
@@ -233,8 +235,25 @@ async function refreshLogs() {
   div.innerHTML = rows.map(l => `
     <div class="${l.status}">
       [${(l.started_at || "").slice(5, 19)}] ${l.task_type} · ${l.target_email || "-"} · ${l.status}
-      ${l.message ? " · " + l.message.slice(0, 80) : ""}
+      ${l.message ? " · " + l.message.slice(0, 160) : ""}
     </div>`).join("");
+  div.scrollTop = 0;
+}
+
+async function setupCA() {
+  const r = await api("/api/setup", {method: "POST"});
+  if (r.installed) {
+    alert("CA 证书注入成功");
+  } else if (r.detail) {
+    alert("注入失败: " + (typeof r.detail === "string" ? r.detail : JSON.stringify(r.detail)));
+  }
+  refreshLogs();
+}
+
+async function clearLogs() {
+  if (!confirm("清空所有任务日志?")) return;
+  await api("/api/logs", {method: "DELETE"});
+  refreshLogs();
 }
 
 function refreshAll() {

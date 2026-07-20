@@ -27,11 +27,20 @@ def start_mitmproxy(cfg: Config, capture_addon_path: Optional[str] = None) -> Op
 
     log_dir = os.path.join(os.path.dirname(cfg.token_queue_file) or ".", "mitm_logs")
     os.makedirs(log_dir, exist_ok=True)
-    out_log = open(os.path.join(log_dir, "mitm.out.log"), "w", encoding="utf-8")
-    err_log = open(os.path.join(log_dir, "mitm.err.log"), "w", encoding="utf-8")
+    # 行缓冲 (buffering=1): 让 [addon] INTERCEPTED 等日志实时写入文件, 便于排查
+    out_log = open(os.path.join(log_dir, "mitm.out.log"), "w", encoding="utf-8", buffering=1)
+    err_log = open(os.path.join(log_dir, "mitm.err.log"), "w", encoding="utf-8", buffering=1)
+
+    # 把 DB / 队列文件路径以绝对路径传给 addon 子进程, 确保双写落到同一份 DB
+    env = os.environ.copy()
+    env["GPTPLUS_DB"] = os.path.abspath(env.get("GPTPLUS_DB", "gptplus.db"))
+    env["TOKEN_QUEUE_FILE"] = os.path.abspath(cfg.token_queue_file)
+    env["TOKEN_EXPIRY_HOURS"] = str(cfg.token_expiry_hours)
+
     proc = subprocess.Popen(
         [mitmdump, *args],
         stdout=out_log, stderr=err_log,
+        env=env,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     time.sleep(3)

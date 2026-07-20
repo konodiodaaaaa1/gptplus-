@@ -203,19 +203,33 @@ def stage_gpt_login(email: str) -> StepResult:
 
 
 def stage_wait_token(email: str, timeout: int = 600) -> StepResult:
-    """等待 mitmproxy 捕获 token. 这一步无熔断 (是在等用户操作), 但有超时."""
+    """等待 mitmproxy 捕获 token. 这一步无熔断 (是在等用户操作), 但有超时.
+
+    改造: 每 ~15s 写一条 running 日志, 让 WebUI 在漫长等待期间也有实时反馈.
+    """
     store = get_checkpoint_store()
     deadline = time.time() + timeout
     from .db import CapturedToken
-    last_count = 0
     with db.get_session() as s:
         last_count = len(s.exec(select(CapturedToken)).all())
+    start_ts = time.time()
+    last_log = 0.0
     while time.time() < deadline:
         time.sleep(3)
         with db.get_session() as s:
-            now = len(s.exec(select(CapturedToken)).all())
-        if now > last_count:
+            now_count = len(s.exec(select(CapturedToken)).all())
+        now_ts = time.time()
+        if now_ts - last_log >= 15:
+            elapsed = int(now_ts - start_ts)
+            db.log_task("wait_token", "running", target_email=email,
+                        message=f"等待 token 中 ({elapsed}s/{timeout}s), 队列 {now_count} 条")
+            last_log = now_ts
+        if now_count > last_count:
+            db.log_task("wait_token", "success", target_email=email,
+                        message=f"token 已捕获 (队列 {now_count} 条)")
             return StepResult(True, "token 已捕获", stage="wait_token")
+    db.log_task("wait_token", "failed", target_email=email,
+                message=f"等待 token 超时 ({timeout}s)")
     return StepResult(False, f"等待 token 超时 ({timeout}s)", stage="wait_token")
 
 

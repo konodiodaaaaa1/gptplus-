@@ -11,7 +11,10 @@ from pathlib import Path
 try:
     import tomllib  # py311+
 except ModuleNotFoundError:  # pragma: no cover
-    tomllib = None  # type: ignore[assignment]
+    try:
+        import tomli as tomllib  # type: ignore[assignment]  # py3.10 fallback
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
 
 
 REVENUECAT_API_KEY_DEFAULT = "goog_DPguJtknNxbQBStStwhWGRsghUw"  # GPT Android 公开 RevenueCat 公钥, 非个人配置
@@ -148,12 +151,26 @@ def _from_toml(cfg: Config, path: str) -> Config:
     return cfg
 
 
+def _project_root() -> str:
+    """定位项目根目录 (含 src/ 的目录), 用于 cwd 无关地找 config.toml/gptplus.db."""
+    here = os.path.dirname(os.path.abspath(__file__))  # .../src
+    parent = os.path.dirname(here)                      # .../gptplus-simulator
+    if os.path.isdir(os.path.join(parent, "src")):
+        return parent
+    return os.getcwd()
+
+
 def load_config(explicit_path: str | None = None) -> Config:
     cfg = Config()
     candidates = []
     if explicit_path:
         candidates.append(explicit_path)
+    # 1. cwd 相对 (原行为)
     candidates.append("config.toml")
+    # 2. 项目根目录绝对路径兜底 (web app cwd 不在项目目录时仍能读到 config.toml)
+    root = _project_root()
+    if root:
+        candidates.append(os.path.join(root, "config.toml"))
     for p in candidates:
         if os.path.exists(p):
             cfg = _from_toml(cfg, p)
