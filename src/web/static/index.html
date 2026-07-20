@@ -21,12 +21,25 @@
         <button id="btn-intercept" onclick="toggleIntercept()">启动拦截</button>
         <button onclick="setupCA()">注入CA证书</button>
       </div>
+
+      <details style="margin-top:12px;">
+        <summary style="cursor:pointer;color:#555;">对接配置 (MuMu / 代理)</summary>
+        <div style="margin-top:8px;">
+          <div class="hint">MuMu 对接地址与上游代理. 留空=自动检测. upstream 变更需重启拦截生效.</div>
+          <div class="row"><input type="text" id="cfg-adb" placeholder="MuMu adb.exe 路径 (留空自动检测)"></div>
+          <div class="row"><input type="text" id="cfg-serial" placeholder="设备序列号 如 192.168.x.x:5555 (留空自动枚举)"></div>
+          <div class="row"><input type="text" id="cfg-upstream" placeholder="mitm 上游代理 如 http://127.0.0.1:7890 (Clash)"></div>
+          <div class="row"><input type="number" id="cfg-port" placeholder="mitm 端口 (默认 8888)" value="8888" style="width:120px;">
+            <button onclick="saveConfig()">保存配置</button>
+          </div>
+        </div>
+      </details>
     </div>
 
     <div class="panel" style="margin-bottom:20px;">
       <h2>2. 批量导入 Google 账号</h2>
       <div class="hint">格式: 每行一条 <code>email----password</code> 或 <code>email:password</code></div>
-      <textarea id="import-text" placeholder="ganyuxing816@gmail.com----password123&#10;another@gmail.com:pwd456"></textarea>
+      <textarea id="import-text" placeholder="demo_account_1@gmail.com----your_password&#10;demo_account_2@gmail.com:your_password"></textarea>
       <div class="row" style="margin-top:8px;">
         <button onclick="importAccounts()">导入</button>
         <button class="secondary" onclick="document.getElementById('import-text').value=''">清空</button>
@@ -113,6 +126,30 @@ async function refreshStatus() {
   const btn = document.getElementById("btn-intercept");
   btn.textContent = s.mitm_running ? "停止拦截" : "启动拦截";
   btn.className = s.mitm_running ? "danger" : "";
+}
+
+async function loadConfig() {
+  const c = await api("/api/config");
+  document.getElementById("cfg-adb").value = c.adb_path || "";
+  document.getElementById("cfg-serial").value = c.serial || "";
+  document.getElementById("cfg-upstream").value = c.upstream_proxy || "";
+  document.getElementById("cfg-port").value = c.mitm_port || 8888;
+}
+
+async function saveConfig() {
+  const body = {
+    adb_path: document.getElementById("cfg-adb").value.trim(),
+    serial: document.getElementById("cfg-serial").value.trim(),
+    upstream_proxy: document.getElementById("cfg-upstream").value.trim(),
+    mitm_port: parseInt(document.getElementById("cfg-port").value) || 8888,
+  };
+  const r = await api("/api/config", {method: "POST", body: JSON.stringify(body)});
+  if (r.saved) {
+    alert("配置已保存" + (r.hint ? "\n\n" + r.hint : ""));
+  } else {
+    alert("保存失败: " + (r.detail || JSON.stringify(r)));
+  }
+  refreshLogs();
 }
 
 async function toggleIntercept() {
@@ -257,7 +294,7 @@ async function clearLogs() {
 }
 
 function refreshAll() {
-  refreshStatus(); refreshAccounts(); refreshTokens(); refreshLogs();
+  refreshStatus(); refreshAccounts(); refreshTokens(); refreshLogs(); loadConfig();
 }
 refreshAll();
 setInterval(refreshAll, 5000);

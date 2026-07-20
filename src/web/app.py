@@ -81,6 +81,13 @@ class ActivateNextReq(BaseModel):
     storefront: str = "US"
 
 
+class ConfigReq(BaseModel):
+    adb_path: str = ""
+    serial: str = ""
+    mitm_port: int = 8888
+    upstream_proxy: str = ""
+
+
 # ============================================================
 # 页面
 # ============================================================
@@ -89,6 +96,90 @@ class ActivateNextReq(BaseModel):
 async def index():
     with open(os.path.join(_HERE, "static", "index.html"), "r", encoding="utf-8") as f:
         return f.read()
+
+
+# ============================================================
+# 对接配置 (MuMu adb/serial + mitm 上游代理)
+# ============================================================
+
+def _save_config_toml(adb_path: str, serial: str, mitm_port: int, upstream_proxy: str) -> str:
+    """把对接配置写回 config.toml (保留 [api] [files] 段).
+
+    toml literal string (单引号) 不处理转义, 含反斜杠的 Windows 路径安全.
+    """
+    cfg_path = os.path.abspath(os.path.join(_HERE, "..", "..", "config.toml"))
+    # 读现有 [api] [files] 保留
+    existing = {}
+    try:
+        import tomllib
+        with open(cfg_path, "rb") as f:
+            existing = tomllib.load(f)
+    except Exception:
+        pass
+    lines = ["[mumu]"]
+    if adb_path:
+        lines.append(f"adb_path = '{adb_path}'")
+    if serial:
+        lines.append(f"serial = '{serial}'")
+    lines.append("")
+    lines.append("[mitm]")
+    lines.append('host = "0.0.0.0"')
+    lines.append(f"port = {int(mitm_port)}")
+    if upstream_proxy:
+        lines.append(f'upstream_proxy = "{upstream_proxy}"')
+    lines.append("")
+    api_sec = existing.get("api", {})
+    if api_sec:
+        lines.append("[api]")
+        for k, v in api_sec.items():
+            if isinstance(v, str):
+                lines.append(f'{k} = "{v}"')
+            elif isinstance(v, bool):
+                lines.append(f'{k} = {"true" if v else "false"}')
+            else:
+                lines.append(f'{k} = {v}')
+        lines.append("")
+    files_sec = existing.get("files", {})
+    if files_sec:
+        lines.append("[files]")
+        for k, v in files_sec.items():
+            if isinstance(v, str):
+                lines.append(f'{k} = "{v}"')
+            else:
+                lines.append(f'{k} = {v}')
+        lines.append("")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        f.write("
+".join(lines))
+    return cfg_path
+
+
+@app.get("/api/config")
+async def api_get_config():
+    """读当前对接配置 (MuMu adb/serial + mitm 端口 + 上游代理)."""
+    cfg = load_config()
+    return {
+        "adb_path": cfg.adb_path,
+        "serial": cfg.serial,
+        "mitm_host": cfg.mitm_host,
+        "mitm_port": cfg.mitm_port,
+        "upstream_proxy": cfg.upstream_proxy,
+        "mitm_running": _mitm_proc is not None and _mitm_proc.poll() is None,
+    }
+
+
+@app.post("/api/config")
+async def api_set_config(req: ConfigReq):
+    """保存对接配置到 config.toml. upstream_proxy 变更需重启 mitm 才生效."""
+    cfg_path = _save_config_toml(req.adb_path, req.serial, req.mitm_port, req.upstream_proxy)
+    mitm_running = _mitm_proc is not None and _mitm_proc.poll() is None
+    hint = None
+    if mitm_running:
+        hint = "mitm 正在运行, upstream_proxy 变更需停止后重新启动拦截才生效"
+    log_task("config", "success",
+             message=f"adb={req.adb_path or '(自动)'} serial={req.serial or '(自动)'} "
+                     f"port={req.mitm_port} upstream={req.upstream_proxy or '(直连)'}")
+    return {"saved": True, "config_path": cfg_path, "mitm_running": mitm_running, "hint": hint}
 
 
 # ============================================================
