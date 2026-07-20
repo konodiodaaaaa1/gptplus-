@@ -210,6 +210,7 @@ SQLite (默认 `gptplus.db`, 环境变量 `GPTPLUS_DB` 可改), 三张表:
 ## 测试覆盖度说明
 
 > 为避免误导, 这里如实标注各部分的真实测试状态。本项目的链路较长, 部分环节依赖外部账号与支付, 未能完成端到端样本验证。
+> 下方标记 `【2026-07-20 实测】` 的项为当天在真机 MuMu 12 + Clash Verge + mitmproxy 环境下真实跑通的验证。
 
 ### 已验证通过 (有测试样本)
 
@@ -221,31 +222,45 @@ SQLite (默认 `gptplus.db`, 环境变量 `GPTPLUS_DB` 可改), 三张表:
 | mitmproxy addon 捕获 `fetch_token` 逻辑 | 单元 + mock 流量 | ✅ 入队 + 阻断 + 假 200 |
 | RevenueCat `assemble_revenuecat_headers / body` (token 拼接) | 字段比对真实抓包 | ✅ 字段完全一致 |
 | `mumu_mock_subscription_flow.py demo` (mock 端到端) | 5 个测试场景 | ✅ 全部通过 (200/409/409) |
-| WebUI 后端 19 个 API 路由 + 首页 | uvicorn 冒烟测试 | ✅ 全部 200 |
-| WebUI 前端单页 | 浏览器加载 | ✅ 正常渲染 |
+| WebUI 后端 API 路由 + 首页 | uvicorn 冒烟测试 | ✅ 全部 200 (含新增 /api/setup, DELETE /api/logs) |
+| WebUI 前端单页 | 浏览器加载 | ✅ 正常渲染 (含注入CA/清空日志按钮, 5s 轮询日志) |
 | 熔断器 (CircuitBreaker) | 离线场景 3 次失败触发 | ✅ OPEN + 冷却 + reset |
 | 断点保护 (CheckpointStore) | 中断 + resume 续跑 | ✅ 断点持久化 + 正确恢复 |
 | `detect_mumu` 超时保护 | MuMu 离线场景 | ✅ 8 秒内返回 None |
+| **WebUI `/api/setup` 一键注入 CA** `【2026-07-20 实测】` | 真机 MuMu root, POST /api/setup | ✅ 返回 `installed:true`, setup success 日志入 DB |
+| **addon token 双写 (tokens.jsonl + SQLite capturedtoken)** `【2026-07-20 实测】` | MOCK token 经 mitm 代理发送 | ✅ 文件 + DB 同时落入, 字段一致, 幂等去重生效 |
+| **addon 阻断真实请求 + 假 200** `【2026-07-20 实测】` | 修复 `Response.make` 后, MOCK token 返回假 200 | ✅ 真实 RevenueCat 未收到请求, token 不被消费 |
+| **mitm → Clash upstream 链式出口** `【2026-07-20 实测】` | mitm 8888 经 Clash 7890 出口测 | ✅ revenuecat 200 / openai 401 / google 204 全通 |
+| **config.toml 真实加载 (tomli fallback)** `【2026-07-20 实测】` | Python 3.10 + tomli, load_config 验证 | ✅ upstream_proxy 正确加载为 http://127.0.0.1:7890 |
+| **mitm 日志行缓冲实时输出** `【2026-07-20 实测】` | mitm.out.log 监控 | ✅ `[addon] INTERCEPTED` / `BLOCKED` 实时可见 |
+| **`stage_wait_token` 实时进度日志** `【2026-07-20 实测】` | pipeline 运行中查 /api/logs | ✅ 每 15s 写一条 `等待 token 中 (Ns/600s), 队列 M 条` |
+| **pipeline 断点续跑 (resume=true)** `【2026-07-20 实测】` | 设断点 wait_token, 启动 pipeline | ✅ 从 wait_token 开始, checkpoint store + mtime reload 生效 |
+| **activate 代码路径完整** `【2026-07-20 实测】` | MOCK token 经 pipeline activate 阶段 | ✅ 代码路径通, MOCK token 被真实 RevenueCat 拒绝非代码问题 |
+| **account_id 从 device 读取** `【2026-07-20 实测】` | 读 MuMu RevenueCat prefs XML | ✅ 真实读到 `3dd94892-8498-4cdc-bf0f-48a0b6ad089f` |
+| **sub2api 导出端点格式** `【2026-07-20 实测】` | /api/sub2api/export + /api/sub2api/config | ✅ 产出正确格式 (email/account_id/jwt/plus_expires/storefront) |
+| **WebUI 实时日志轮询** `【2026-07-20 实测】` | 前端 5s 轮询 /api/logs | ✅ tasklog 表实时写入, 前端即时显示 |
 
 ### 未能完成样本验证 (后续需补)
 
 | 模块 | 未验证原因 | 风险点 |
 |------|------------|--------|
-| **Google Play 支付 → `fetch_token` 真实捕获** | 测试用 Google 账号被封禁, 无法完成支付 | mitmproxy addon 逻辑已验证, 但未走过真实支付流量 |
-| **`activate` 真实激活 Plus** | 缺少有效 `fetch_token` 样本 | RevenueCat 请求体字段已比对真实抓包, 但未提交过真实 token |
-| **Pipeline 端到端 (Play 登录 → GPT 登录 → 捕获 → 激活)** | 同上, 账号封禁导致链路在第 1 步中断 | 各阶段单元逻辑已验证, 串联未跑通 |
-| **`stage_play_login` UI 自动化** | MuMu 离线时返回 `未检测到 MuMu` (符合预期), 但在线时的 UI 元素定位未实测 | 不同 MuMu 版本/分辨率下 UI 文本可能不同, 需按实际调整 `_wait_for_text` 匹配规则 |
-| **`stage_gpt_login` OAuth 自动化** | GPT 登录走 Auth0 浏览器跳转, 自动化复杂度高, 当前仅检测已登录态 | 完整 OAuth 输入流程未实现, 当前需手动完成 |
+| **Google Play 支付 → `fetch_token` 真实捕获** | 测试用 Google 账号被封禁/无支付方式, 无法完成支付 | mitmproxy addon 逻辑已用 MOCK token 验证双写+阻断, 但未走过真实支付流量 |
+| **`activate` 真实激活 Plus** | 缺少有效 `fetch_token` 样本 | RevenueCat 请求体字段已比对真实抓包, 代码路径已通, 但未提交过真实 token |
+| **Pipeline 端到端真实跑通 (Play 登录 → GPT 登录 → 捕获 → 激活)** | 缺有效 Google 账号完成支付, 链路在 wait_token → activate 之间断 | 各阶段单元逻辑 + 串联调度已验证 (MOCK token 走通到 activate), 仅缺真实 token 收口 |
+| **`stage_play_login` UI 自动化** | MuMu 在线时账号已登录, 再走 ADD_ACCOUNT 流程多余 | 不同 MuMu 版本/分辨率下 UI 文本可能不同, 需按实际调整 `_wait_for_text` 匹配规则 |
+| **`stage_gpt_login` OAuth 自动化** | GPT 登录走 Auth0 浏览器跳转, 自动化复杂度高, 当前仅检测已登录态 | 完整 OAuth 输入流程未实现, 当前需手动完成登录后由系统检测 account_id |
 | **`stage_verify` 独立验证** | 依赖 `gpt_jwt`, 未在真实账号上跑 | 逻辑已实现, 待样本验证 |
-| **sub2api 导出对接** | 缺少已激活账号 | 字段格式已按常见 sub2api 项目设计, 实际对接需按目标项目调整 |
+| **sub2api 导出与真实 sub2api 项目对接** | 缺少已真实激活 Plus 的账号 | 字段格式已验证导出正确, 实际对接需按目标 sub2api 项目调整 |
 
 ### 后续验证计划
 
 1. 准备一个未被封禁、有支付方式的 Google 账号
-2. 在 MuMu 内完成真实 Plus 支付, 验证 `fetch_token` 被 addon 捕获
+2. 在 MuMu 内完成真实 Plus 支付, 验证 `fetch_token` 被 addon 捕获 (双写文件 + DB)
 3. 用捕获的 token + 目标 GPT 账号 `account_id` 跑 `activate`, 验证 Plus 开通
 4. 跑通完整 pipeline, 验证断点/熔断在真实流程中的行为
 5. 验证 sub2api 导出字段与目标 sub2api 项目对接
+
+### 已知限制
 
 ### 已知限制
 
