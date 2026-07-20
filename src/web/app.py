@@ -149,8 +149,7 @@ def _save_config_toml(adb_path: str, serial: str, mitm_port: int, upstream_proxy
                 lines.append(f'{k} = {v}')
         lines.append("")
     with open(cfg_path, "w", encoding="utf-8") as f:
-        f.write("
-".join(lines))
+        f.write("\n".join(lines))
     return cfg_path
 
 
