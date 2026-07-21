@@ -43,10 +43,10 @@ def get_account_id(jwt: str, cfg: Config) -> str | None:
     if status != 200:
         print(f"[get_account_id] HTTP {status}: {body}")
         return None
-    aid = body.get("account_id") or body.get("account", {}).get("account_id") if isinstance(body.get("account"), dict) else None
-    if not aid:
-        # 兜底: 有时 account_id 在外层
-        aid = body.get("account_id")
+    # 提取 account_id: 优先顶层, 其次嵌套在 account dict 中
+    aid = body.get("account_id")
+    if not aid and isinstance(body.get("account"), dict):
+        aid = body["account"].get("account_id")
     if not aid:
         print(f"[get_account_id] 响应无 account_id: {json.dumps(body, ensure_ascii=False)[:300]}")
         return None
@@ -60,12 +60,13 @@ def assemble_revenuecat_headers(cfg: Config, storefront: str = "US") -> dict[str
     return h
 
 
-def assemble_revenuecat_body(fetch_token: str, app_user_id: str, is_restore: bool = False) -> dict[str, Any]:
+def assemble_revenuecat_body(fetch_token: str, app_user_id: str, cfg: Config,
+                              is_restore: bool = False) -> dict[str, Any]:
     """token 拼接: fetch_token + app_user_id 组装成完整 receipt 提交体."""
     return {
         "fetch_token": fetch_token,
-        "product_ids": [cfg_product_id()],
-        "platform_product_ids": [{"product_id": cfg_product_id()}],
+        "product_ids": [cfg.product_id],
+        "platform_product_ids": [{"product_id": cfg.product_id}],
         "app_user_id": app_user_id,
         "is_restore": is_restore,
         "observer_mode": False,
@@ -74,16 +75,6 @@ def assemble_revenuecat_body(fetch_token: str, app_user_id: str, is_restore: boo
         "sdk_originated": False,
         "payload_version": 1,
     }
-
-
-_cfg_singleton = None
-
-
-def cfg_product_id() -> str:
-    # 避免 revenuecat 模块对 Config 全局依赖, 使用 caller 传入 cfg 的 product_id
-    # 在本项目中 assemble_revenuecat_body 由 activate_plus 调用, 内部已用 cfg
-    # 此函数仅为兼容旧调用保留, 默认返回标准 product_id
-    return "oai.chatgpt.plus"
 
 
 def submit_to_revenuecat(fetch_token: str, app_user_id: str, cfg: Config,

@@ -1,8 +1,15 @@
-﻿"""MuMu UI 自动化编排: 通过 ADB input 模拟点击/输入.
+"""MuMu UI 自动化编排: 通过 ADB input 模拟点击/输入.
+
+两阶段 Pipeline (与 GPT Plus 订阅转移原理与操作指南一致):
+
+Phase A — 捕获 token (用支付账号完成 Google Play 购买, mitmproxy 拦截):
+    ensure_prereqs → play_login → gpt_open → purchase → wait_token
+
+Phase B — 激活 (用目标账号的 account_id 提交 token):
+    get_account_id → activate → verify
 
 改造点 (失败检查 + 熔断 + 断点保护):
-    1. 每个阶段 (play_login / gpt_login / wait_token / activate / verify) 都被
-       CircuitBreaker 包裹, 连续失败 N 次自动熔断
+    1. 每个阶段都被 CircuitBreaker 包裹, 连续失败 N 次自动熔断
     2. CheckpointStore 持久化每个账号已完成的阶段, 中断后可 resume_pipeline 从断点续跑
     3. 每步用 retry_with_backoff 处理瞬时错误
     4. 超时/截图/异常都记录到 TaskLog, 便于排查
@@ -127,8 +134,87 @@ def _update_account_status(email: str, status: str, **fields) -> None:
 
 
 # ============================================================
-# 各阶段实现 (全部被 CircuitBreaker 保护)
+# Phase A 阶段: 捕获 token
 # ============================================================
+
+@with_circuit("ensure_prereqs", failure_threshold=2, cooldown_seconds=120)
+def stage_ensure_prereqs(email: str) -> StepResult:
+    """自动检查/启动前置条件: mitmproxy + CA 注入 + MuMu 代理.
+
+    确保拦截环境就绪, 否则 wait_token 会空等到超时.
+    """
+    cfg = load_config()
+    inst = detect_mumu(cfg)
+    if inst is None:
+        return StepResult(False, "未检测到 MuMu", stage="ensure_prereqs")
+
+    try:
+        prerequisites_ok = True
+        messages = []
+
+        # 1. 检查 mitmproxy 是否在运行
+        from ..mitm_runner import start_mitmproxy, set_mumu_proxy_to_mitm
+        # 通过 /api/intercept/start 的逻辑检查 — 直接看端口
+        import socket
+        mitm_running = False
+        try:
+            with socket.create_connection(("127.0.0.1", cfg.mitm_port), timeout=2):
+                mitm_running = True
+        except OSError:
+            pass
+
+        if not mitm_running:
+            messages.append("mitmproxy 未运行, 自动启动")
+            import os
+            addon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "addon.py")
+            mitm_proc = start_mitmproxy(cfg, capture_addon_path=os.path.abspath(addon_path))
+            if mitm_proc is None:
+                return StepResult(False, "mitmproxy 启动失败, 请确认已 pip install mitmproxy",
+                                  stage="ensure_prereqs")
+            # 等待端口就绪
+            for _ in range(10):
+                time.sleep(1)
+                try:
+                    with socket.create_connection(("127.0.0.1", cfg.mitm_port), timeout=2):
+                        mitm_running = True
+                        break
+                except OSError:
+                    pass
+            if not mitm_running:
+                return StepResult(False, "mitmproxy 启动后端口未就绪", stage="ensure_prereqs")
+            # 记录进程到 app.py 的全局变量 (通过环境变量标记)
+            os.environ["GPTPLUS_MITM_AUTO_STARTED"] = "1"
+            messages.append("mitmproxy 已自动启动")
+
+        # 2. 检查 CA 是否已注入 (检测设备系统 CA 目录中是否有 mitmproxy 证书)
+        rc, out = _adb(inst, ["shell", "su -c 'ls /system/etc/security/cacerts/'"])
+        has_ca = "mitmproxy" in out.lower() or rc != 0  # rc!=0 可能没root, 跳过
+        if not has_ca and inst.rooted:
+            from ..ca_inject import install_mitm_ca
+            if install_mitm_ca(inst, cfg):
+                messages.append("CA 证书已自动注入")
+            else:
+                messages.append("CA 注入失败 (可能需重启 MuMu)")
+
+        # 3. 设置 MuMu 代理指向 mitmproxy
+        rc_proxy, proxy_out = _adb(inst, ["shell", "settings get global http_proxy"])
+        current_proxy = proxy_out.strip()
+        # 检查代理是否已指向 mitm (包含 mitm 端口)
+        if str(cfg.mitm_port) not in current_proxy or current_proxy == ":0" or current_proxy == "":
+            set_mumu_proxy_to_mitm(inst, cfg)
+            messages.append("MuMu 代理已指向 mitmproxy")
+        else:
+            messages.append("MuMu 代理已配置")
+
+        _update_account_status(email, "prereqs_ok")
+        all_msg = "; ".join(messages) if messages else "所有前置条件已就绪"
+        return StepResult(True, all_msg, stage="ensure_prereqs")
+
+    except Exception as e:
+        return StepResult(False, f"前置检查异常: {e}",
+                          _screenshot(inst, f"prereqs_{email}_err") if inst else None,
+                          stage="ensure_prereqs")
+
 
 @with_circuit("play_login", failure_threshold=3, cooldown_seconds=300)
 def stage_play_login(email: str, password: str) -> StepResult:
@@ -181,25 +267,97 @@ def stage_play_login(email: str, password: str) -> StepResult:
                           stage="play_login")
 
 
-@with_circuit("gpt_login", failure_threshold=3, cooldown_seconds=300)
-def stage_gpt_login(email: str) -> StepResult:
+@with_circuit("gpt_open", failure_threshold=3, cooldown_seconds=300)
+def stage_gpt_open(email: str) -> StepResult:
+    """打开 GPT App, 确认主界面已加载.
+
+    此阶段只打开 app, 不获取 account_id (account_id 在 Phase B 通过
+    目标账号 JWT 获取, 而非支付账号的 RC prefs).
+    """
     inst = _get_instance()
     if inst is None:
-        return StepResult(False, "未检测到 MuMu", stage="gpt_login")
+        return StepResult(False, "未检测到 MuMu", stage="gpt_open")
     try:
         _adb(inst, ["shell", "am", "start", "-n", "com.openai.chatgpt/.MainActivity"])
         time.sleep(5)
-        rc, out = _adb(inst,
-                       ["shell", "su -c 'cat /data/data/com.openai.chatgpt/shared_prefs/com_revenuecat_purchases_preferences.xml'"])
-        m = re.search(r'\.new">([0-9a-f-]{36})<', out)
-        if m:
-            account_id = m.group(1)
-            _update_account_status(email, "gpt_logged_in", gpt_account_id=account_id)
-            return StepResult(True, f"GPT 已登录, account_id={account_id}", stage="gpt_login")
-        return StepResult(False, "未检测到 account_id, 需手动完成 OAuth 登录",
-                          _screenshot(inst, f"gpt_{email}"), stage="gpt_login")
+
+        # 确认 GPT App 已启动 — 等待主界面出现 (聊天入口或侧边栏)
+        xml = _uiautomator_dump(inst)
+        if re.search(r"ChatGPT|chat|new chat|新对话|menu|菜单", xml, re.I):
+            _update_account_status(email, "gpt_opened")
+            return StepResult(True, "GPT App 已打开, 主界面已加载", stage="gpt_open")
+
+        # 可能需要登录 — 检测登录按钮
+        if re.search(r"log in|sign in|登录|登录", xml, re.I):
+            return StepResult(False, "GPT App 需要登录, 请先在设备上完成 GPT 账号登录",
+                              _screenshot(inst, f"gpt_open_{email}"), stage="gpt_open")
+
+        return StepResult(False, "GPT App 未检测到主界面",
+                          _screenshot(inst, f"gpt_open_{email}"), stage="gpt_open")
     except Exception as e:
-        return StepResult(False, f"异常: {e}", stage="gpt_login")
+        return StepResult(False, f"异常: {e}", stage="gpt_open")
+
+
+@with_circuit("purchase", failure_threshold=3, cooldown_seconds=300)
+def stage_purchase(email: str) -> StepResult:
+    """提示用户在 MuMu 上手动完成 Plus 订阅购买.
+
+    操作指南步骤1: "进入订阅页面, 选择 Plus, 完成 Google Play 支付".
+    由于 GPT App 各版本 UI 布局差异大, 订阅/支付按钮位置不确定,
+    改为等待用户手动完成购买. 购买完成后 mitmproxy 会自动拦截
+    RevenueCat POST /v1/receipts 并保存 token.
+    """
+    inst = _get_instance()
+    if inst is None:
+        return StepResult(False, "未检测到 MuMu", stage="purchase")
+    try:
+        # 确保 GPT App 在前台
+        _adb(inst, ["shell", "am", "start", "-n", "com.openai.chatgpt/.MainActivity"])
+        time.sleep(2)
+
+        _update_account_status(email, "purchasing")
+        db.log_task("purchase", "running", target_email=email,
+                    message="⏳ 请在 MuMu 上手动操作: 打开 GPT App → 点击 Plus 订阅 → 完成 Google Play 支付. "
+                            "mitmproxy 会自动拦截 token.")
+
+        # 轮询等待 token 被捕获 (与 wait_token 逻辑相同, 但这里有即时提示)
+        # 实际的 token 等待由后续 stage_wait_token 完成, 这里只等待用户开始购买
+        # 检查是否有新的 token 出现, 最多等 120 秒作为"购买引导"窗口
+        from .db import CapturedToken
+        with db.get_session() as s:
+            initial_count = len(s.exec(select(CapturedToken)).all())
+
+        deadline = time.time() + 120  # 给用户 2 分钟操作时间
+        last_log = 0.0
+        while time.time() < deadline:
+            time.sleep(3)
+            now_ts = time.time()
+            if now_ts - last_log >= 30:
+                elapsed = int(now_ts - (deadline - 120))
+                db.log_task("purchase", "running", target_email=email,
+                            message=f"等待手动完成购买 ({elapsed}s/120s) — "
+                                    "请在 MuMu 上: GPT App → Plus 订阅 → Google Play 支付")
+                last_log = now_ts
+            # 如果 token 已经被捕获, 说明用户已完成购买, 可以提前结束
+            with db.get_session() as s:
+                current_count = len(s.exec(select(CapturedToken)).all())
+            if current_count > initial_count:
+                db.log_task("purchase", "success", target_email=email,
+                            message="检测到 token 已被捕获, 购买完成")
+                return StepResult(True, "手动购买完成, token 已被 mitmproxy 拦截",
+                                  stage="purchase")
+
+        # 120 秒内未检测到 token — 仍然进入 wait_token 阶段 (那里有更长的超时)
+        return StepResult(True,
+                          "请在 MuMu 上完成 Plus 订阅购买 (后续 wait_token 阶段会等待 token). "
+                          "GPT App → Plus 订阅 → Google Play 支付完成后, "
+                          "mitmproxy 会自动拦截 token",
+                          stage="purchase")
+
+    except Exception as e:
+        return StepResult(False, f"异常: {e}",
+                          _screenshot(inst, f"purchase_{email}_err") if inst else None,
+                          stage="purchase")
 
 
 def stage_wait_token(email: str, timeout: int = 600) -> StepResult:
@@ -233,20 +391,77 @@ def stage_wait_token(email: str, timeout: int = 600) -> StepResult:
     return StepResult(False, f"等待 token 超时 ({timeout}s)", stage="wait_token")
 
 
+# ============================================================
+# Phase B 阶段: 激活 (转移)
+# ============================================================
+
+@with_circuit("get_account_id", failure_threshold=3, cooldown_seconds=300)
+def stage_get_account_id(email: str) -> StepResult:
+    """用目标账号的 JWT 请求 OpenAI accounts/check 获取 account_id.
+
+    这是转移的核心: 支付账号 A 的 token + 目标账号 B 的 account_id.
+    必须用目标账号的 JWT (不是支付账号的), 才能拿到目标 account_id.
+    """
+    with db.get_session() as s:
+        from .db import GoogleAccount
+        acc = s.exec(select(GoogleAccount).where(GoogleAccount.email == email)).first()
+        if not acc:
+            return StepResult(False, "账号不存在", stage="get_account_id")
+
+        # 优先使用 target_jwt (转移场景: 导入时指定的目标账号 JWT)
+        # 其次使用 gpt_jwt (自激活场景: 同一个账号的 JWT)
+        jwt_token = acc.target_jwt or acc.gpt_jwt
+
+    if not jwt_token:
+        return StepResult(False,
+                          "缺少目标账号 JWT, 无法获取 account_id。"
+                          "导入格式: email----password----jwt (jwt 为目标 GPT 账号的 Bearer token)",
+                          stage="get_account_id")
+
+    from ..revenuecat import get_account_id
+    cfg = load_config()
+    account_id = get_account_id(jwt_token, cfg)
+    if account_id:
+        _update_account_status(email, "got_account_id", gpt_account_id=account_id)
+        # 如果 target_jwt 存在但 gpt_jwt 为空, 也把 target_jwt 写入 gpt_jwt 以便 verify 使用
+        with db.get_session() as s:
+            acc_obj = s.exec(select(GoogleAccount).where(GoogleAccount.email == email)).first()
+            if acc_obj and not acc_obj.gpt_jwt and acc_obj.target_jwt:
+                acc_obj.gpt_jwt = acc_obj.target_jwt
+                s.add(acc_obj)
+                s.commit()
+        return StepResult(True, f"目标 account_id={account_id} (通过 JWT accounts/check 获取)", stage="get_account_id")
+
+    return StepResult(False, "JWT accounts/check 未返回 account_id, 请检查 JWT 是否有效",
+                      stage="get_account_id")
+
+
 @with_circuit("activate", failure_threshold=3, cooldown_seconds=600)
 def stage_activate(email: str) -> StepResult:
+    """用捕获的 token + 目标 account_id 提交 RevenueCat 激活.
+
+    token 来自 Phase A (支付账号的 Google Play 购买),
+    account_id 来自 stage_get_account_id (目标账号的 JWT → accounts/check).
+    两者独立, 实现"转移".
+    """
     inst = _get_instance()
     if inst is None:
         return StepResult(False, "未检测到 MuMu", stage="activate")
-    # 从缓存 token 取下一个, 提交给该账号的 account_id
+    # 从缓存 token 取下一个未过期、未使用的 token, 提交给目标 account_id
+    now_iso = datetime.now(_TZ).isoformat()
     with db.get_session() as s:
         from .db import GoogleAccount, CapturedToken
         acc = s.exec(select(GoogleAccount).where(GoogleAccount.email == email)).first()
         if not acc or not acc.gpt_account_id:
-            return StepResult(False, "缺少 account_id", stage="activate")
-        tok = s.exec(select(CapturedToken).where(CapturedToken.used == False).order_by(CapturedToken.id)).first()
+            return StepResult(False, "缺少 target account_id (需先完成 get_account_id 阶段)", stage="activate")
+        tok = s.exec(
+            select(CapturedToken)
+            .where(CapturedToken.used == False)
+            .where(CapturedToken.expires_at > now_iso)  # 过滤过期 token (与 gptplustest 一致)
+            .order_by(CapturedToken.id)
+        ).first()
         if not tok:
-            return StepResult(False, "token 队列为空", stage="activate")
+            return StepResult(False, "token 队列为空 (无未过期的可用 token)", stage="activate")
         fetch_token = tok.fetch_token
         account_id = acc.gpt_account_id
 
@@ -267,7 +482,7 @@ def stage_activate(email: str) -> StepResult:
                 acc_obj.status = "subscribed"
                 s.add(acc_obj)
             s.commit()
-        return StepResult(True, "激活成功", stage="activate")
+        return StepResult(True, "激活成功 (token 已转移到目标账号)", stage="activate")
     return StepResult(False, "RevenueCat 激活失败", stage="activate")
 
 
@@ -300,9 +515,12 @@ def stage_verify(email: str) -> StepResult:
 
 # 阶段路由
 _STAGES = {
+    "ensure_prereqs": lambda email, cp: stage_ensure_prereqs(email),
     "play_login": lambda email, cp: stage_play_login(email, _get_password(email)),
-    "gpt_login": lambda email, cp: stage_gpt_login(email),
+    "gpt_open": lambda email, cp: stage_gpt_open(email),
+    "purchase": lambda email, cp: stage_purchase(email),
     "wait_token": lambda email, cp: stage_wait_token(email),
+    "get_account_id": lambda email, cp: stage_get_account_id(email),
     "activate": lambda email, cp: stage_activate(email),
     "verify": lambda email, cp: stage_verify(email),
 }

@@ -1,4 +1,4 @@
-﻿"""FastAPI WebUI 后端.
+"""FastAPI WebUI 后端.
 
 启动:
     python -m src.web.app --host 0.0.0.0 --port 8080
@@ -6,7 +6,7 @@
 接口:
     GET  /api/status                     MuMu 状态
     GET  /api/accounts                   列出所有账号
-    POST /api/accounts/import            批量导入 [{email, password}, ...]
+    POST /api/accounts/import            批量导入 [{email, password, target_jwt?}, ...]
     POST /api/accounts/{email}/pipeline  对该账号跑完整链路
     DELETE /api/accounts/{email}         删除账号
     GET  /api/tokens                     列出 token 队列
@@ -49,7 +49,7 @@ import os
 _TZ = timezone(timedelta(hours=8))
 _HERE = os.path.dirname(__file__)
 
-app = FastAPI(title="GPT Plus 模拟器 WebUI", version="0.1.0")
+app = FastAPI(title="GPT Plus 模拟器 WebUI", version="0.2.0")
 app.mount("/static", StaticFiles(directory=os.path.join(_HERE, "static")), name="static")
 
 # 全局 mitmproxy 进程 (单实例)
@@ -64,6 +64,7 @@ _mitm_lock = threading.Lock()
 class AccountImport(BaseModel):
     email: str
     password: str
+    target_jwt: str = ""  # 目标 GPT 账号的 JWT (转移场景必填)
 
 
 class BatchImport(BaseModel):
@@ -137,7 +138,7 @@ def _save_config_toml(adb_path: str, serial: str, mitm_port: int, upstream_proxy
             elif isinstance(v, bool):
                 lines.append(f'{k} = {"true" if v else "false"}')
             else:
-                lines.append(f'{k} = {v}')
+                lines.append(f"{k} = {v}")
         lines.append("")
     files_sec = existing.get("files", {})
     if files_sec:
@@ -146,7 +147,7 @@ def _save_config_toml(adb_path: str, serial: str, mitm_port: int, upstream_proxy
             if isinstance(v, str):
                 lines.append(f'{k} = "{v}"')
             else:
-                lines.append(f'{k} = {v}')
+                lines.append(f"{k} = {v}")
         lines.append("")
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -217,6 +218,11 @@ async def api_list_accounts():
 
 @app.post("/api/accounts/import")
 async def api_import(batch: BatchImport):
+    """批量导入账号. 支持 email----password----jwt 三段格式.
+
+    target_jwt 是目标 GPT 账号的 Bearer token, 用于转移场景:
+    支付账号 A (email/password) 支付获取 token, 目标账号 B (jwt) 接收 Plus.
+    """
     added, skipped = 0, 0
     with get_session() as s:
         for a in batch.accounts:
@@ -224,7 +230,12 @@ async def api_import(batch: BatchImport):
             if exists:
                 skipped += 1
                 continue
-            s.add(GoogleAccount(email=a.email, password=a.password, status="pending"))
+            s.add(GoogleAccount(
+                email=a.email,
+                password=a.password,
+                target_jwt=a.target_jwt or None,
+                status="pending",
+            ))
             added += 1
         s.commit()
     return {"added": added, "skipped": skipped}
@@ -239,8 +250,6 @@ async def api_delete_account(email: str):
         s.delete(acc)
         s.commit()
     return {"deleted": email}
-
-    return {"started": True, "email": email, "message": "任务已异步启动, 查看日志查看进度"}
 
 
 # ============================================================
@@ -304,6 +313,15 @@ async def api_list_tokens():
 @app.post("/api/tokens/activate")
 async def api_activate(req: ActivateReq):
     cfg = load_config()
+    # 检查 token 是否已过期
+    with get_session() as s:
+        tok_check = s.exec(select(CapturedToken).where(CapturedToken.fetch_token == req.fetch_token)).first()
+        if tok_check:
+            now_iso = datetime.now(_TZ).isoformat()
+            if tok_check.expires_at <= now_iso:
+                raise HTTPException(400, f"token 已过期 (expires_at={tok_check.expires_at})")
+            if tok_check.used:
+                raise HTTPException(409, "token 已被使用")
     ok = activate_plus(req.fetch_token, req.account_id, cfg=cfg, storefront=req.storefront)
     if ok:
         with get_session() as s:
@@ -327,13 +345,17 @@ async def api_activate(req: ActivateReq):
 
 @app.post("/api/tokens/activate-next")
 async def api_activate_next(req: ActivateNextReq):
-    """从队列取下一个可用 token 激活到指定 account_id."""
+    """从队列取下一个可用 token 激活到指定 account_id (自动跳过已过期 token)."""
+    now_iso = datetime.now(_TZ).isoformat()
     with get_session() as s:
         tok = s.exec(
-            select(CapturedToken).where(CapturedToken.used == False).order_by(CapturedToken.id)
+            select(CapturedToken)
+            .where(CapturedToken.used == False)
+            .where(CapturedToken.expires_at > now_iso)  # 过滤过期 token (与 gptplustest 一致)
+            .order_by(CapturedToken.id)
         ).first()
         if not tok:
-            raise HTTPException(404, "no available token in queue")
+            raise HTTPException(404, "no available token in queue (all used or expired)")
         fetch_token = tok.fetch_token
     return await api_activate(ActivateReq(fetch_token=fetch_token, account_id=req.account_id, storefront=req.storefront))
 
@@ -463,7 +485,12 @@ class PipelineReq(BaseModel):
 
 @app.post("/api/accounts/{email}/pipeline")
 async def api_run_pipeline(email: str, resume: bool = True):
-    """对该账号异步跑完整链路. resume=True 从断点续跑, False 从头开始."""
+    """对该账号异步跑完整链路. resume=True 从断点续跑, False 从头开始.
+
+    两阶段流程 (与操作指南一致):
+    Phase A: 捕获 token (ensure_prereqs → play_login → gpt_open → purchase → wait_token)
+    Phase B: 激活转移 (get_account_id → activate → verify)
+    """
     def _worker():
         try:
             automation.run_pipeline_with_checkpoint(email, resume=resume)
@@ -491,11 +518,10 @@ async def api_sub2api_export():
         return [{
             "email": r.email,
             "account_id": r.gpt_account_id,
-            "jwt": r.gpt_jwt,
+            "jwt": r.gpt_jwt or r.target_jwt,
             "plus_expires": r.plus_expires,
             "storefront": "US",
         } for r in rows]
-
 
 @app.get("/api/sub2api/config")
 async def api_sub2api_config():
@@ -505,8 +531,8 @@ async def api_sub2api_config():
         accounts = [{
             "email": r.email,
             "account_id": r.gpt_account_id,
-            "token": r.gpt_jwt,
-        } for r in rows if r.gpt_jwt]
+            "token": r.gpt_jwt or r.target_jwt,
+        } for r in rows if r.gpt_jwt or r.target_jwt]
     return {
         "accounts": accounts,
         "api_base": "https://android.chat.openai.com/backend-api",

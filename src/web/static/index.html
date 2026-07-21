@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -37,9 +37,13 @@
     </div>
 
     <div class="panel" style="margin-bottom:20px;">
-      <h2>2. 批量导入 Google 账号</h2>
-      <div class="hint">格式: 每行一条 <code>email----password</code> 或 <code>email:password</code></div>
-      <textarea id="import-text" placeholder="demo_account_1@gmail.com----your_password&#10;demo_account_2@gmail.com:your_password"></textarea>
+      <h2>2. 批量导入账号</h2>
+      <div class="hint">
+        格式: 每行一条 <code>email----password</code> 或 <code>email----password----jwt</code><br>
+        <b>jwt</b> = 目标 GPT 账号的 Bearer Token (用于转移场景: 支付账号付钱, jwt 对应的账号开 Plus)<br>
+        如无 jwt, 激活时会尝试从设备读取 account_id (自激活模式)
+      </div>
+      <textarea id="import-text" placeholder="pay_account_1@gmail.com----pay_password----eyJhbGciOiJSUzI1NiIs...&#10;pay_account_2@gmail.com----pay_password&#10;pay_account_3@gmail.com----pay_password----target_jwt_here"></textarea>
       <div class="row" style="margin-top:8px;">
         <button onclick="importAccounts()">导入</button>
         <button class="secondary" onclick="document.getElementById('import-text').value=''">清空</button>
@@ -48,8 +52,13 @@
 
     <div class="panel">
       <h2>3. 账号管理</h2>
+      <div class="hint" style="margin-bottom:8px;">
+        流程: 导入邮箱 → 跑流程 → 自动完成 <b>捕获 token + 转移激活</b><br>
+        <b>购买部分需手动操作</b>: purchase 阶段会提示你在 MuMu 上点击 Plus 订阅 + Google Play 支付<br>
+        <b>必须提供 JWT</b>才能获得目标 account_id 完成转移, 否则 get_account_id 阶段会失败
+      </div>
       <table id="accounts-table">
-        <thead><tr><th>邮箱</th><th>状态</th><th>account_id</th><th>Plus</th><th>操作</th></tr></thead>
+        <thead><tr><th>邮箱</th><th>状态</th><th>account_id</th><th>目标JWT</th><th>Plus</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
       <div class="row" style="margin-top:8px;">
@@ -166,11 +175,15 @@ function parseImportText(text) {
   return text.split("\n").map(l => l.trim()).filter(Boolean).map(line => {
     let parts;
     if (line.includes("----")) parts = line.split("----");
-    else if (line.includes(":")) parts = line.split(/:(.+)/);
     else if (line.includes("|")) parts = line.split("|");
+    else if (line.includes(":")) parts = line.split(/:(.+)/);
     else return null;
     if (parts.length < 2) return null;
-    return {email: parts[0].trim(), password: parts[1].trim()};
+    return {
+      email: parts[0].trim(),
+      password: parts[1].trim(),
+      target_jwt: (parts[2] || "").trim(),  // 第三段: 目标 GPT 账号 JWT
+    };
   }).filter(Boolean);
 }
 
@@ -181,7 +194,8 @@ async function importAccounts() {
   const r = await api("/api/accounts/import", {
     method: "POST", body: JSON.stringify({accounts}),
   });
-  alert(`导入完成: 新增 ${r.added}, 跳过(已存在) ${r.skipped}`);
+  const jwtCount = accounts.filter(a => a.target_jwt).length;
+  alert(`导入完成: 新增 ${r.added}, 跳过(已存在) ${r.skipped}\n其中有 JWT 的: ${jwtCount} (可用于转移激活)`);
   refreshAccounts();
 }
 
@@ -193,6 +207,7 @@ async function refreshAccounts() {
       <td>${r.email}</td>
       <td><span class="badge ${r.status}">${r.status}</span></td>
       <td>${r.gpt_account_id || "-"}</td>
+      <td>${r.target_jwt ? "✅ 已设" : "❌ 未设"}</td>
       <td>${r.plus_active ? "✅" : "✗"}</td>
       <td>
         <button onclick="runPipeline('${r.email}')">跑流程</button>
@@ -209,13 +224,15 @@ async function runPipeline(email) {
 
 async function runAllPipelines() {
   const rows = await api("/api/accounts");
+  let started = 0;
   for (const r of rows) {
     if (["pending", "failed"].includes(r.status)) {
       await api(`/api/accounts/${encodeURIComponent(r.email)}/pipeline`, {method: "POST"});
+      started++;
       await new Promise(r => setTimeout(r, 3000));
     }
   }
-  alert("批量流程已启动");
+  alert(`批量流程已启动: ${started} 个账号`);
   refreshAccounts();
 }
 

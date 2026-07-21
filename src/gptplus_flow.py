@@ -17,6 +17,7 @@ GPT Plus 模拟器订阅链路自动化工具（仅供学习）
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -26,7 +27,7 @@ from dataclasses import dataclass
 from .config import load_config
 from .mumu_detect import detect_mumu, MuMuInstance
 from .ca_inject import install_mitm_ca
-from .mitm_runner import start_mitmproxy, stop_mitmproxy
+from .mitm_runner import start_mitmproxy, stop_mitmproxy, set_mumu_proxy_to_mitm
 from .token_capture import run_capture_until_token
 from .token_queue import TokenQueue
 from .revenuecat import (
@@ -76,24 +77,38 @@ def cmd_intercept(args: argparse.Namespace) -> int:
     if inst is None:
         print("[intercept] 未检测到 MuMu")
         return 1
+
+    # 自动定位内置 addon (如果用户未指定)
+    addon_path = args.addon
+    if addon_path is None:
+        addon_path = os.path.join(os.path.dirname(__file__), "addon.py")
+        if not os.path.isfile(addon_path):
+            print(f"[intercept] 内置 addon 不存在: {addon_path}")
+            print("[intercept] 请通过 --addon 指定 mitmproxy addon 脚本路径")
+            return 2
+
     print(f"[intercept] 启动 mitmproxy 卡片监听 {cfg.mitm_host}:{cfg.mitm_port} (上游 {cfg.upstream_proxy})")
-    mitm_proc = start_mitmproxy(cfg, capture_addon_path=args.addon)
+    print(f"[intercept] addon: {addon_path}")
+    mitm_proc = start_mitmproxy(cfg, capture_addon_path=addon_path)
     if mitm_proc is None:
         print("[intercept] mitmproxy 启动失败, 请确认已 `pip install mitmproxy`")
         return 2
     try:
-        queue = TokenQueue(cfg.token_queue_file)
+        # 把 MuMu 代理切到 mitmproxy (与 WebUI 行为一致)
+        if inst:
+            set_mumu_proxy_to_mitm(inst, cfg)
+            print(f"[intercept] MuMu 代理已指向 mitmproxy")
+
+        # addon 已双写 tokens.jsonl + SQLite, 无需再用 TokenQueue 重复入队
+        # 只需等待新 token 出现
         print("[intercept] 等待 RevenueCat POST /v1/receipts 请求 ...")
         print(f"[intercept] 在 MuMu 内打开 GPT app -> 升级 Plus -> 完成 Google Play 支付")
         print(f"[intercept] token 将自动入队: {cfg.token_queue_file}")
         token = run_capture_until_token(cfg, timeout=args.timeout)
         if token:
-            idx = queue.enqueue(token.fetch_token, metadata={
-                "original_app_user_id": token.app_user_id,
-                "storefront": token.storefront,
-            })
-            print(f"[intercept] 捕获成功, token 队列索引 #{idx}")
+            print(f"[intercept] 捕获成功")
             print(f"[intercept] fetch_token = {token.fetch_token[:32]}...")
+            print(f"[intercept] owner = {token.app_user_id or 'unknown'}")
             return 0
         else:
             print("[intercept] 超时, 未捕获到 token")
@@ -145,7 +160,7 @@ def cmd_assemble(args: argparse.Namespace) -> int:
     """仅展示 token 拼接结果, 不发请求。用于学习原理。"""
     cfg = load_config(args.config)
     headers = assemble_revenuecat_headers(cfg, storefront=args.storefront)
-    body = assemble_revenuecat_body(args.fetch_token, args.account_id)
+    body = assemble_revenuecat_body(args.fetch_token, args.account_id, cfg=cfg)
     print("=== RevenueCat POST /v1/receipts Headers ===")
     for k, v in headers.items():
         print(f"  {k}: {v}")
@@ -168,7 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("setup", help="注入 mitmproxy CA 证书到 MuMu").set_defaults(func=cmd_setup)
 
     p_int = sub.add_parser("intercept", help="启动 mitmproxy 拦截 RevenueCat 捕获 fetch_token")
-    p_int.add_argument("--addon", default=None, help="mitmproxy addon 脚本路径 (默认使用内置 addon)")
+    p_int.add_argument("--addon", default=None, help="mitmproxy addon 脚本路径 (默认使用内置 src/addon.py)")
     p_int.add_argument("--timeout", type=int, default=600, help="等待 token 超时秒数 (默认 600)")
     p_int.set_defaults(func=cmd_intercept)
 
