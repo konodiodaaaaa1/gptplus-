@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import time
 from typing import Optional
+from urllib.parse import urlsplit
 
 from .config import Config
 from .mumu_detect import MuMuInstance, _run_adb
@@ -59,7 +61,7 @@ def stop_mitmproxy(proc: Optional[subprocess.Popen], inst: Optional[MuMuInstance
             proc.kill()
     # 还原 MuMu 代理为上游翻墙代理 (避免切断网络)
     if inst is not None:
-        target = cfg.upstream_proxy.replace("http://", "").replace("https://", "") if cfg.upstream_proxy else ":0"
+        target = _proxy_target_for_mumu(cfg.upstream_proxy, inst.serial)
         _run_adb(inst.adb_path, inst.serial, ["shell", f"settings put global http_proxy {target}"])
         print(f"[mitm_runner] MuMu 代理已还原为: {target or '(无)'}")
 
@@ -99,16 +101,50 @@ def _find_mitmdump() -> Optional[str]:
 
 def _guess_host_ip(mumu_serial: str) -> str:
     """从 MuMu serial (可能是 192.168.x.x:5555 或 127.0.0.1:5555) 推断本机 IP."""
-    if mumu_serial.startswith("127.0.0.1") or mumu_serial.startswith("localhost"):
-        return "127.0.0.1"
+    serial_host = mumu_serial.rsplit(":", 1)[0].strip("[]")
+    route_target = serial_host if not _is_loopback_host(serial_host) else "8.8.8.8"
     try:
-        import socket
-        # 取本机任意 IPv4
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
+            # UDP connect 不发包，只用于选择能到达 MuMu 的本机网卡。
+            s.connect((route_target, 80))
+            host_ip = s.getsockname()[0]
+            if not _is_loopback_host(host_ip):
+                return host_ip
         finally:
             s.close()
     except Exception:
-        return ""
+        pass
+
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            host_ip = info[4][0]
+            if not _is_loopback_host(host_ip):
+                return host_ip
+    except OSError:
+        pass
+
+    # MuMu 通过本机端口连接 ADB 时，模拟器内的 127.0.0.1 仍指向自身。
+    return "10.0.2.2" if _is_loopback_host(serial_host) else ""
+
+
+def _proxy_target_for_mumu(proxy: str, mumu_serial: str) -> str:
+    """把代理配置转换为 Android global http_proxy 接受且 MuMu 可达的 host:port."""
+    if not proxy:
+        return ":0"
+
+    value = proxy.strip()
+    parsed = urlsplit(value if "://" in value else f"//{value}")
+    try:
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        return value
+    if not host or port is None:
+        return value
+    if _is_loopback_host(host):
+        host = _guess_host_ip(mumu_serial)
+    return f"{host}:{port}"
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host.lower() in {"127.0.0.1", "localhost", "::1"}

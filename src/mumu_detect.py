@@ -33,7 +33,7 @@ class MuMuInstance:
 def _run_adb(adb: str, serial: str, args: list[str], timeout: int = 10) -> tuple[int, str]:
     cmd = [adb, "-s", serial, *args]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except FileNotFoundError:
         return 127, f"adb not found: {adb}"
@@ -54,7 +54,10 @@ def _find_adb_binary(cfg: Config) -> str | None:
 
 def _list_devices(adb: str) -> list[str]:
     try:
-        r = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=8)
+        r = subprocess.run(
+            [adb, "devices"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=8,
+        )
     except Exception:
         return []
     serials = []
@@ -138,7 +141,10 @@ def detect_mumu(cfg: Config) -> Optional[MuMuInstance]:
         for serial in cfg.mumu_serial_candidates[:2]:
             if ":" in serial:
                 try:
-                    subprocess.run([adb, "connect", serial], capture_output=True, text=True, timeout=3)
+                    subprocess.run(
+                        [adb, "connect", serial], capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=3,
+                    )
                 except Exception:
                     pass
             inst = _probe_device(adb, serial)
