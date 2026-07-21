@@ -54,7 +54,6 @@ class Config:
         r"googleapis\.com|google\.com|gstatic\.com|googleusercontent\.com|"
         r"googlevideo\.com|nie\.netease\.com|netease\.com|mumu"
     )
-    mitm_addon_module: str = "gptplus_simulator_tools.addon"
 
     # 文件路径
     token_queue_file: str = "tokens.jsonl"

@@ -134,19 +134,26 @@ def with_circuit(name: str, failure_threshold: int = 3, cooldown_seconds: int = 
 # ============================================================
 
 # Pipeline 阶段定义 (按顺序执行)
+# Phase A — 捕获 token (用支付账号完成 Google Play 购买, mitmproxy 拦截):
+#   ensure_prereqs → play_login → gpt_open → purchase → wait_token
+# Phase B — 激活 (用目标账号的 account_id 提交 token):
+#   get_account_id → activate → verify
 PIPELINE_STAGES = [
-    "play_login",        # Play Store 登录
-    "gpt_login",         # GPT app 登录 (获取 account_id)
-    "wait_token",        # 等待 mitmproxy 捕获 token
-    "activate",          # 提交 RevenueCat 激活
-    "verify",            # 验证 Plus 已开通
+    "ensure_prereqs",   # 自动检查/启动 mitmproxy + CA 注入 + 代理
+    "play_login",       # Play Store 登录 (支付账号)
+    "gpt_open",         # 打开 GPT App (取代原来的 gpt_login, 不再在此获取 account_id)
+    "purchase",         # ADB 自动点击 Plus 订阅 + Play 支付确认
+    "wait_token",       # 等待 mitmproxy 捕获 token
+    "get_account_id",   # 用目标账号 JWT 请求 accounts/check 获取 account_id (转移核心)
+    "activate",         # 提交 RevenueCat 激活 (token 来自 Phase A, account_id 来自目标账号)
+    "verify",           # 验证 Plus 状态
 ]
 
 
 @dataclass
 class Checkpoint:
     email: str
-    current_stage: str = "play_login"
+    current_stage: str = "ensure_prereqs"
     completed_stages: list[str] = field(default_factory=list)
     failed_stage: Optional[str] = None
     last_error: Optional[str] = None
